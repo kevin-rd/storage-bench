@@ -1,14 +1,12 @@
 FROM golang:1.22.4-bullseye AS builder
 
-ENV GOPROXY=https://goproxy.cn,direct
+WORKDIR /go/cache
+COPY go.mod go.sum ./
+RUN go mod download
 
 WORKDIR /workspace
-
-COPY go.mod go.sum ./
-RUN go mod tidy && go mod download
-
 COPY  . .
-RUN make build
+RUN go build -o build/storage-bench main.go
 
 
 FROM golang:1.22.4-bullseye
