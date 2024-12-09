@@ -10,61 +10,67 @@ import (
 
 func HandleStatics(concurrency uint64, ch <-chan *TestResult) {
 	var (
-		requestCostTimeList []time.Duration     // 耗时数组
-		processingTime      time.Duration   = 0 // processingTime 处理总耗时
-		requestCostTime     time.Duration   = 0 // requestCostTime 请求总时间
-		maxTime             time.Duration   = 0 // maxTime 至今为止单个请求最大耗时
-		minTime             time.Duration   = 0 // minTime 至今为止单个请求最小耗时
-		successNum          uint64          = 0
-		failureNum          uint64          = 0
-		chanIdLen           uint64          = 0 // chanIdLen 并发数
-		stopChan                            = make(chan bool)
-		mutex                               = sync.RWMutex{}
-		chanIds                             = make(map[int]bool)
+		costTimeList    []time.Duration                  // 耗时数组
+		processingTime  time.Duration   = 0              // processingTime 处理总耗时
+		requestCostTime time.Duration   = 0              // requestCostTime 请求总时间
+		maxTime         time.Duration   = 0              // maxTime 至今为止单个请求最大耗时
+		minTime         time.Duration   = 24 * time.Hour // minTime 至今为止单个请求最小耗时
+		successNum      uint64          = 0
+		failureNum      uint64          = 0
+		chanIdLen       uint64          = 0 // chanIdLen 并发数
+		stopChan                        = make(chan bool)
+		mutex                           = sync.RWMutex{}
+		chanIds                         = make(map[int]bool)
 	)
 
 	startTime := time.Now()
 	respCodeMap := sync.Map{}
 	ticker := time.NewTicker(time.Second)
+
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				endTime := time.Now()
+				curTime := time.Now()
 				mutex.Lock()
-				go calculateData(concurrency, processingTime, endTime.Sub(startTime), maxTime, minTime, successNum, failureNum, chanIdLen, &respCodeMap)
+				go calculateData(concurrency, processingTime, curTime.Sub(startTime), maxTime, minTime, successNum, failureNum, chanIdLen, &respCodeMap)
 				mutex.Unlock()
 			case <-stopChan:
 				return
 			}
 		}
 	}()
+
 	printHeader()
 	for respRes := range ch {
 		mutex.Lock()
+
+		// total process time
 		processingTime = processingTime + respRes.Cost
-		if maxTime <= respRes.Cost {
-			maxTime = respRes.Cost
-		}
-		if minTime == 0 {
-			minTime = respRes.Cost
-		} else if minTime > respRes.Cost {
-			minTime = respRes.Cost
-		}
-		if respRes.Err == nil {
+		if respRes.Success {
 			successNum = successNum + 1
+			if maxTime <= respRes.Cost {
+				maxTime = respRes.Cost
+			}
+			if minTime > respRes.Cost {
+				minTime = respRes.Cost
+			}
+
+			if _, ok := chanIds[respRes.ChanId]; !ok {
+				chanIds[respRes.ChanId] = true
+				chanIdLen = uint64(len(chanIds))
+			}
+
+			// success cost time, for P90 cal
+			costTimeList = append(costTimeList, respRes.Cost)
+
 		} else {
 			failureNum = failureNum + 1
 		}
 
-		// 统计并发数
-		if _, ok := chanIds[int(respRes.ChanId)]; !ok {
-			chanIds[int(respRes.ChanId)] = true
-			chanIdLen = uint64(len(chanIds))
-		}
-		requestCostTimeList = append(requestCostTimeList, respRes.Cost)
 		mutex.Unlock()
 	}
+
 	// 数据全部接受完成，停止定时输出统计数据
 	stopChan <- true
 	endTime := time.Now()
@@ -74,41 +80,33 @@ func HandleStatics(concurrency uint64, ch <-chan *TestResult) {
 	fmt.Printf("\n\n")
 	fmt.Println("*************************  结果 stat  ****************************")
 	fmt.Println("处理协程数量:", concurrency)
-	fmt.Println("请求总数（并发数*请求数 -c * -n）:", successNum+failureNum, "总请求时间:",
-		fmt.Sprintf("%.3f", float64(requestCostTime)/1e9),
-		"秒", "successNum:", successNum, "failureNum:", failureNum)
-	printTop(requestCostTimeList)
+	fmt.Printf("请求总数: %d 总请求时间: %.3f秒 successNum: %d failureNum: %d\n",
+		successNum+failureNum, requestCostTime.Seconds(), successNum, failureNum)
+	printTop(costTimeList)
 	fmt.Println("*************************  结果 end   ****************************")
 	fmt.Printf("\n\n")
 }
 
 func calculateData(concurrent uint64, processingTime, costTime, maxTime, minTime time.Duration, successNum, failureNum, chanIdLen uint64, respCodeMap *sync.Map) {
-	if processingTime == 0 || chanIdLen == 0 {
+	if processingTime == 0 || successNum == 0 {
 		return
 	}
 
-	var qps, averageTime, maxTimeFloat, minTimeFloat, requestCostTimeFloat float64
+	// QPS: 协程数 * (成功数/总耗时)
+	qps := float64(successNum*concurrent) / processingTime.Seconds()
 
-	// 平均 QPS 成功数*总协程数/总耗时 (每秒)
-	qps = float64(successNum*1e9*concurrent) / float64(processingTime)
+	// avg cost: 总耗时/总请求数
+	averageTime := processingTime.Seconds() / float64(successNum)
 
-	// 平均耗时 总耗时/总请求数/并发数 纳秒=>毫秒
-	if successNum != 0 && concurrent != 0 {
-		averageTime = float64(processingTime) / float64(successNum*1e6)
-	}
-	maxTimeFloat = float64(maxTime) / 1e6
-	minTimeFloat = float64(minTime) / 1e6
-	requestCostTimeFloat = float64(costTime) / 1e9
-
-	result := fmt.Sprintf("%4.0fs│%7d│%7d│%7d│%8.2f│%11.2f│%11.2f│%11.2f│%v",
-		requestCostTimeFloat, chanIdLen, successNum, failureNum, qps, maxTimeFloat, minTimeFloat, averageTime, printMap(respCodeMap))
+	result := fmt.Sprintf("%4.0fs│%7d│%7d│%7d│%8.2f│%10.2fs│%10.2fs│%10.2fs│%v",
+		costTime.Seconds(), chanIdLen, successNum, failureNum, qps, averageTime, minTime.Seconds(), maxTime.Seconds(), printMap(respCodeMap))
 	fmt.Println(result)
 }
 
 func printHeader() {
 	fmt.Printf("\n\n")
 	fmt.Println("─────┬───────┬───────┬───────┬────────┬───────────┬───────────┬───────────┬────────")
-	fmt.Println(" cost│ 并发数 │ 成功数 │ 失败数 │   qps  │max cost/ms│min cost/ms│avg cost/ms│ xxx    ")
+	fmt.Println(" cost│concurr│success│ failed│   qps  │ avg cost/s│ min cost/s│max cost/ms│ xxx    ")
 	fmt.Println("─────┼───────┼───────┼───────┼────────┼───────────┼───────────┼───────────┼────────")
 	return
 }
@@ -126,17 +124,18 @@ func printMap(respCodeMap *sync.Map) (mapStr string) {
 	return
 }
 
-// printTop 排序后计算 top 90 95 99
-func printTop(requestCostTimeList []time.Duration) {
-	if len(requestCostTimeList) == 0 {
+// printTop top 90 95 99
+func printTop(costTimeList []time.Duration) {
+	if len(costTimeList) == 0 {
 		return
 	}
+
 	all := durationArray{}
-	all = requestCostTimeList
+	all = costTimeList
 	sort.Sort(all)
-	fmt.Println("tp90:", fmt.Sprintf("%.3fms", float64(all[int(float64(len(all))*0.90)]/1e6)))
-	fmt.Println("tp95:", fmt.Sprintf("%.3fms", float64(all[int(float64(len(all))*0.95)]/1e6)))
-	fmt.Println("tp99:", fmt.Sprintf("%.3fms", float64(all[int(float64(len(all))*0.99)]/1e6)))
+	fmt.Println("P90:", fmt.Sprintf("%.2fs", all[int(float64(len(all))*0.90)].Seconds()))
+	fmt.Println("P95:", fmt.Sprintf("%.2fs", all[int(float64(len(all))*0.95)].Seconds()))
+	fmt.Println("P99:", fmt.Sprintf("%.2fs", all[int(float64(len(all))*0.99)].Seconds()))
 }
 
 type durationArray []time.Duration
