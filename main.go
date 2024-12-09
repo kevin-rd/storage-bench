@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/kevin-rd/storage-bench/internal"
 	"github.com/zkMeLabs/mechain-go-sdk/client"
 	"github.com/zkMeLabs/mechain-go-sdk/types"
 	"io"
@@ -16,10 +17,12 @@ const (
 	privateKey = "27cb97c6b79b255a6558bf89d9e673e00febbb739b4741861a5654c140b37621"
 
 	// Testnet Info
+	chainId    = "mechain_5151-1"
 	rpcAddr    = "https://testnet-lcd.mechain.tech:443"
 	evmRpcAddr = "https://testnet-rpc.mechain.tech"
 
-	chainId = "mechain_5151-1"
+	concurrency  = 20 // 并发数
+	testDuration = 60 * time.Second
 )
 
 func main() {
@@ -37,51 +40,58 @@ func main() {
 
 	// 2. Create a bucket
 	_ = strings.TrimPrefix(account.GetAddress().String(), "0x")[0:4]
-	bucketName, objectName := "b-"+"2344"+"-kevin", "o-"+"2344"+"-10m"
+	bucketName, objectName := "b-"+"2344"+"-kevin", "o-"+"2344"+"-10k"
 
 	var wg sync.WaitGroup
-	ch := make(chan time.Duration, 10)
+	var wgReceiver sync.WaitGroup
+	ch := make(chan *internal.TestResult, concurrency)
 
-	for i := 0; i < 10; i++ {
+	wgReceiver.Add(1)
+	go func() {
+		defer wgReceiver.Done()
+		internal.HandleStatics(concurrency, ch)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testDuration)
+	defer cancel()
+
+	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
-		go func() {
+		go func(index int, ch chan<- *internal.TestResult) {
 			defer wg.Done()
-			if err := getObject(cli, bucketName, objectName, ch); err != nil {
-				log.Printf("get object error, %v", err)
-				return
+
+			for j := 0; true; {
+				if ctx.Err() != nil {
+					return
+				}
+				r := &internal.TestResult{
+					ID:        j*10000 + index,
+					ChanId:    index,
+					Timestamp: time.Now(),
+				}
+				err := getObject(ctx, cli, bucketName, objectName)
+				r.Cost = time.Since(r.Timestamp)
+				if err != nil {
+					r.Err = err
+				}
+				ch <- r
 			}
-		}()
+		}(i, ch)
 	}
 	wg.Wait()
 	close(ch)
-
-	var totalDuration time.Duration
-	var count int
-	for d := range ch {
-		if d > 0 {
-			totalDuration += d
-			count++
-		}
-	}
-	if count > 0 {
-		fmt.Printf("average time: %s\n", totalDuration/time.Duration(count))
-	}
+	wgReceiver.Wait()
 }
 
-func getObject(cli client.IClient, bucketName, objectName string, ch chan<- time.Duration) error {
-	start := time.Now()
-	defer func() {
-		ch <- time.Since(start)
-		log.Printf("get object %s cost %s", objectName, time.Since(start))
-	}()
-
-	ctx := context.TODO()
+func getObject(ctx context.Context, cli client.IClient, bucketName, objectName string) error {
 	o, stat, err := cli.GetObject(ctx, bucketName, objectName, types.GetObjectOptions{})
 	if err != nil {
 		return fmt.Errorf("unable to get object, %v", err)
 	}
-	log.Printf("get object %s successfully, stat: %+v", objectName, stat)
-	defer o.Close()
+	// log.Printf("get object %s successfully, stat: %+v", objectName, stat)
+	defer func() {
+		_ = o.Close()
+	}()
 	buf := make([]byte, stat.Size)
 	for {
 		_, err := o.Read(buf)

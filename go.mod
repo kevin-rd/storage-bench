@@ -1,4 +1,4 @@
-module github.com/zkMeLabs/mechain-cmd
+module github.com/kevin-rd/storage-bench
 
 go 1.21
 
