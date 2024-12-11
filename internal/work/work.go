@@ -10,27 +10,52 @@ import (
 	"github.com/zkMeLabs/mechain-go-sdk/client"
 	"github.com/zkMeLabs/mechain-go-sdk/types"
 	"io"
+	"log"
 	"math/rand"
+	"strings"
 	"time"
 )
 
+const (
+	// Testnet Info
+	chainId    = "mechain_5151-1"
+	rpcAddr    = "https://testnet-lcd.mechain.tech:443"
+	evmRpcAddr = "https://testnet-rpc.mechain.tech"
+)
+
 type Worker struct {
-	id         int
-	cli        client.IClient
-	sequence   int
+	id       int
+	cli      client.IClient
+	sequence int
+
+	account    *types.Account
 	objectSize int64
 	data       []byte
+	bucketName string
 }
 
-func NewWorker(id int, cli client.IClient, objectSize int64) *Worker {
+func NewWorker(id int, objectSize int64, privateKey string) *Worker {
 	data := make([]byte, objectSize)
 	for i := range data {
 		data[i] = byte(rand.Intn(256))
 	}
 
+	// import account
+	account, err := types.NewAccountFromPrivateKey("file_test", privateKey)
+	if err != nil {
+		log.Fatalf("New account from private key error, %v", err)
+	}
+
+	// create client
+	cli, err := client.New(chainId, rpcAddr, evmRpcAddr, privateKey, client.Option{DefaultAccount: account})
+	if err != nil {
+		log.Fatalf("unable to new zkMe Chain client, %v", err)
+	}
+
 	return &Worker{
 		id:         id,
 		cli:        cli,
+		account:    account,
 		objectSize: objectSize,
 		data:       data,
 	}
@@ -77,8 +102,7 @@ func (w *Worker) PutObject(ctx context.Context, bucketPrefix, objectPrefix strin
 	reader := bytes.NewReader(w.data)
 	reader2 := bytes.NewReader(w.data)
 
-	bucketName := fmt.Sprintf("%s-%d", bucketPrefix, w.id%5)
-	objectName := fmt.Sprintf("%s-%03d%03d", objectPrefix, w.id, w.sequence)
+	objectName := genObjectName(w.account.GetAddress().String(), w.id, w.sequence)
 
 	res = &statistics.TestResult{
 		ChanId:  w.id,
@@ -91,7 +115,7 @@ func (w *Worker) PutObject(ctx context.Context, bucketPrefix, objectPrefix strin
 		res.ReadCost = res.Cost - res.ConnectCost
 	}()
 
-	txHash, err := w.cli.CreateObject(ctx, bucketName, objectName, reader, types.CreateObjectOptions{})
+	txHash, err := w.cli.CreateObject(ctx, w.bucketName, objectName, reader, types.CreateObjectOptions{})
 	if err != nil {
 		return res, fmt.Errorf("unable to create object, %v", err)
 	}
@@ -104,7 +128,7 @@ func (w *Worker) PutObject(ctx context.Context, bucketPrefix, objectPrefix strin
 		return res, fmt.Errorf("unable to wait tx success, %v", err)
 	}
 
-	err = w.cli.PutObject(ctx, bucketName, objectName, reader2.Size(), reader2, types.PutObjectOptions{
+	err = w.cli.PutObject(ctx, w.bucketName, objectName, reader2.Size(), reader2, types.PutObjectOptions{
 		ContentType:      "application/octet-stream",
 		DisableResumable: true,
 	})
@@ -112,16 +136,15 @@ func (w *Worker) PutObject(ctx context.Context, bucketPrefix, objectPrefix strin
 		return res, fmt.Errorf("unable to put object, %v", err)
 	}
 
-	timeout := time.After(1 * time.Hour)
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	count := 0
 	for {
 		select {
-		case <-timeout:
-			return res, errors.New("object not sealed after one hour")
+		case <-ctx.Done():
+			return res, errors.New("object was not sealed within the specified time. ")
 		case <-ticker.C:
 			count++
-			headObjOutput, queryErr := w.cli.HeadObject(ctx, bucketName, objectName)
+			headObjOutput, queryErr := w.cli.HeadObject(ctx, w.bucketName, objectName)
 			if queryErr != nil {
 				return res, fmt.Errorf("unable to query object status, %v", queryErr)
 			}
@@ -132,4 +155,38 @@ func (w *Worker) PutObject(ctx context.Context, bucketPrefix, objectPrefix strin
 			}
 		}
 	}
+}
+
+func (w *Worker) InitPut(spAddr string) error {
+	bucketName := genBucketName(w.account.GetAddress().String())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	bucketInfo, err := w.cli.HeadBucket(ctx, bucketName)
+	if err == nil && bucketInfo != nil {
+		w.bucketName = bucketName
+		return nil
+	}
+
+	log.Printf("bucket %s not found, create new bucket", bucketName)
+
+	opts := types.CreateBucketOptions{
+		Visibility:   types2.VISIBILITY_TYPE_PUBLIC_READ,
+		ChargedQuota: 1000000000000,
+	}
+	_, err = w.cli.CreateBucket(ctx, bucketName, spAddr, opts)
+	if err != nil {
+		return err
+	}
+	w.bucketName = bucketName
+	return nil
+}
+
+func genBucketName(addr string) string {
+	return fmt.Sprintf("b-%s-upload", strings.ToLower(strings.TrimPrefix(addr, "0x")[0:4]))
+}
+
+func genObjectName(addr string, a, b int) string {
+	return fmt.Sprintf("o-%s-%s-%03d%03d", strings.ToLower(strings.TrimPrefix(addr, "0x")[0:4]), "ac", a, b)
 }
