@@ -70,12 +70,11 @@ func (w *Worker) GetObject(ctx context.Context, bucketName, objectName string) (
 	w.sequence++
 	defer func() {
 		res.Cost = time.Since(res.ReqTime)
-		res.ReadCost = res.Cost - res.ConnectCost
 	}()
 
 	// get file object meta
 	o, stat, err := w.cli.GetObject(ctx, bucketName, objectName, types.GetObjectOptions{})
-	res.ConnectCost = time.Since(res.ReqTime)
+	res.Step1 = time.Since(res.ReqTime)
 	if err != nil {
 		return res, fmt.Errorf("unable to get object, %v", err)
 	}
@@ -112,7 +111,6 @@ func (w *Worker) PutObject(ctx context.Context, bucketPrefix, objectPrefix strin
 	w.sequence++
 	defer func() {
 		res.Cost = time.Since(res.ReqTime)
-		res.ReadCost = res.Cost - res.ConnectCost
 	}()
 
 	txHash, err := w.cli.CreateObject(ctx, w.bucketName, objectName, reader, types.CreateObjectOptions{})
@@ -123,7 +121,7 @@ func (w *Worker) PutObject(ctx context.Context, bucketPrefix, objectPrefix strin
 	ctxTxTimeout, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	_, err = w.cli.WaitForTx(ctxTxTimeout, txHash)
-	res.ConnectCost = time.Since(res.ReqTime)
+	res.Step1 = time.Since(res.ReqTime)
 	if err != nil {
 		return res, fmt.Errorf("unable to wait tx success, %v", err)
 	}
@@ -132,6 +130,7 @@ func (w *Worker) PutObject(ctx context.Context, bucketPrefix, objectPrefix strin
 		ContentType:      "application/octet-stream",
 		DisableResumable: true,
 	})
+	res.Step2 = time.Since(res.ReqTime) - res.Step1
 	if err != nil {
 		return res, fmt.Errorf("unable to put object, %v", err)
 	}
