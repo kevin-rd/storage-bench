@@ -2,11 +2,10 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"github.com/kevin-rd/storage-bench/internal"
+	"github.com/kevin-rd/storage-bench/internal/statistics"
+	"github.com/kevin-rd/storage-bench/internal/work"
 	"github.com/zkMeLabs/mechain-go-sdk/client"
 	"github.com/zkMeLabs/mechain-go-sdk/types"
-	"io"
 	"log"
 	"sync"
 	"time"
@@ -21,12 +20,16 @@ const (
 	concurrency  = 20 // 并发数
 	testDuration = 600 * time.Second
 
-	privateKey = "27cb97c6b79b255a6558bf89d9e673e00febbb739b4741861a5654c140b37621"
-	bucketName = "b-2344-kevin"
-	objectName = "o-2234-100m"
+	privateKey = "c4eea90f78503630cee2c737d010a198fec1ab5ccf6fbb74d4f7f129cf42dacd"
+	bucketName = "b-b837-kevin"
+	objectName = "o-b837-1m-b"
+	objectSize = 1 * 1024 * 1024
 )
 
 func main() {
+	log.Printf("Starting...")
+	log.Printf("concurrency: %d  testDuration: %.1fs objectName: %s", concurrency, testDuration.Seconds(), objectName)
+
 	// import account
 	account, err := types.NewAccountFromPrivateKey("file_test", privateKey)
 	if err != nil {
@@ -39,38 +42,44 @@ func main() {
 		log.Fatalf("unable to new zkMe Chain client, %v", err)
 	}
 
+	works := make([]*work.Worker, concurrency)
+	for i := 0; i < concurrency; i++ {
+		works[i] = work.NewWorker(i, cli, objectSize)
+	}
+
 	// begin
 	var wg sync.WaitGroup
 	var wgReceiver sync.WaitGroup
-	ch := make(chan *internal.TestResult, concurrency)
+	ch := make(chan *statistics.TestResult, concurrency)
 
+	// statistics
 	wgReceiver.Add(1)
 	go func() {
 		defer wgReceiver.Done()
-		internal.HandleStatics(concurrency, ch)
+		statistics.HandleStatics(concurrency, ch)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), testDuration)
 	defer cancel()
-
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
-		go func(index int, ch chan<- *internal.TestResult) {
+		go func(index int, ch chan<- *statistics.TestResult) {
 			defer wg.Done()
 
-			for j := 0; true; {
+			for {
 				if ctx.Err() != nil {
 					return
 				}
-				r := &internal.TestResult{
-					ID:      j*10000 + index,
-					ChanId:  index,
-					ReqTime: time.Now(),
+				// download file
+				// res, _ := works[index].GetObject(ctx, bucketName, objectName)
+
+				// upload file
+				res, err := works[index].PutObject(ctx, bucketName, objectName)
+				if err != nil {
+					log.Printf("worker %d put object error, %v", index, err)
 				}
-				err := getObject(ctx, cli, bucketName, objectName, r)
-				r.Cost = time.Since(r.ReqTime)
-				r.Success = err == nil
-				ch <- r
+
+				ch <- res
 			}
 		}(i, ch)
 		// Slow start
@@ -79,29 +88,4 @@ func main() {
 	wg.Wait()
 	close(ch)
 	wgReceiver.Wait()
-}
-
-func getObject(ctx context.Context, cli client.IClient, bucketName, objectName string, res *internal.TestResult) error {
-	o, stat, err := cli.GetObject(ctx, bucketName, objectName, types.GetObjectOptions{})
-	if err != nil {
-		return fmt.Errorf("unable to get object, %v", err)
-	}
-	res.ConnectCost = time.Since(res.ReqTime)
-	// log.Printf("get object %s successfully, stat: %+v", objectName, stat)
-	defer func() {
-		res.Cost = time.Since(res.ReqTime)
-		res.ReadCost = res.Cost - res.ConnectCost
-		_ = o.Close()
-	}()
-	buf := make([]byte, stat.Size)
-	for {
-		_, err := o.Read(buf)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("unable to read object, %v", err)
-		}
-	}
-	return nil
 }
