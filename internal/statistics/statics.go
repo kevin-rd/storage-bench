@@ -88,15 +88,17 @@ func HandleStatics(concurrency uint64, ch <-chan *TestResult) {
 }
 
 func calculateData(concurrent uint64, processingTime, costTime, maxTime, minTime time.Duration, successNum, failureNum, chanIdLen uint64, respCodeMap *sync.Map) {
-	if processingTime == 0 || successNum == 0 {
-		return
-	}
+	var qps, averageTime float64
 
 	// QPS: 协程数 * (成功数/总耗时)
-	qps := float64(successNum*concurrent) / processingTime.Seconds()
+	if processingTime != 0 {
+		qps = float64(successNum*concurrent) / processingTime.Seconds()
+	}
 
 	// avg cost: 总耗时/总请求数
-	averageTime := processingTime.Seconds() / float64(successNum)
+	if processingTime != 0 && successNum != 0 {
+		averageTime = processingTime.Seconds() / float64(successNum)
+	}
 
 	result := fmt.Sprintf("%4.0fs│%7d│%7d│%7d│%8.2f│%10.2fs│%10.2fs│%10.2fs│%v",
 		costTime.Seconds(), chanIdLen, successNum, failureNum, qps, averageTime, minTime.Seconds(), maxTime.Seconds(), printMap(respCodeMap))

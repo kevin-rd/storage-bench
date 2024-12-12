@@ -3,7 +3,6 @@ package work
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	types2 "github.com/evmos/evmos/v12/x/storage/types"
 	"github.com/kevin-rd/storage-bench/internal/statistics"
@@ -135,25 +134,8 @@ func (w *Worker) PutObject(ctx context.Context, bucketPrefix, objectPrefix strin
 		return res, fmt.Errorf("unable to put object, %v", err)
 	}
 
-	ticker := time.NewTicker(1 * time.Second)
-	count := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return res, errors.New("object was not sealed within the specified time. ")
-		case <-ticker.C:
-			count++
-			headObjOutput, queryErr := w.cli.HeadObject(ctx, w.bucketName, objectName)
-			if queryErr != nil {
-				return res, fmt.Errorf("unable to query object status, %v", queryErr)
-			}
-			if headObjOutput.ObjectInfo.GetObjectStatus() == types2.OBJECT_STATUS_SEALED {
-				ticker.Stop()
-				res.Success = true
-				return
-			}
-		}
-	}
+	res.Success = true
+	return res, nil
 }
 
 func (w *Worker) InitPut(spAddr string) error {

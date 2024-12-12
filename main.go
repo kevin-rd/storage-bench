@@ -73,6 +73,7 @@ func main() {
 	wgReceiver.Add(1)
 	go func() {
 		defer wgReceiver.Done()
+		log.Printf("statistics start...")
 		statistics.HandleStatics(concurrency, ch)
 	}()
 
@@ -80,6 +81,7 @@ func main() {
 	defer cancel()
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
+		log.Printf("worker %d start...", i)
 		go func(index int, ch chan<- *statistics.TestResult) {
 			defer wg.Done()
 
